@@ -1,0 +1,260 @@
+---
+title: "Testing assingment"
+output: pdf_document
+date: "2025-07-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(forecast)
+```
+
+```{r}
+data = read.csv("2025-06-Elec-train.csv")
+colnames(data) = c("time", "consumption", "temperature")
+
+
+min_value = summary(data[!is.na(data$consumption) & data$consumption != 0, "consumption"])[1]
+data[!is.na(data$consumption) & data$consumption == 0, "consumption"] = min_value
+
+ts = ts(data, frequency = 96)
+
+ts_train = window(ts, end = c(50, 91))[,"consumption"]
+ts_test = window(ts, start = c(50,92))[,"consumption"]
+ts_xreg_train = window(ts, end = c(50, 91))[,"temperature"]
+ts_xreg_test = window(ts, start = c(50,92))[,"temperature"]
+```
+
+```{r}
+plot(diff(diff(ts_train, lag = 96)))
+```
+
+
+```{r}
+#fit_arima = Arima(ts_train, order = c(10,0,10), seasonal = c(0,1,1))
+#checkresiduals(fit_arima)
+
+```
+
+```{r}
+for (p in (1:5)){
+  for (q in (3:5)){
+    mini_arima = Arima(ts_train, order = c(p,0,q), seasonal = c(0,1,1))
+    checkresiduals(mini_arima)
+  }
+}
+```
+
+```{r}
+mini_train = window(ts, end = c(10, 96))[,"consumption"]
+
+
+for (p in (5:8)){
+  for (q in (5:8)){
+    mini_arima = Arima(mini_train, order = c(p,0,q), seasonal = c(0,1,1))
+    checkresiduals(mini_arima)
+  }
+}
+```
+```{r}
+mini_train = window(ts, end = c(10, 96))[,"consumption"]
+
+
+for (p in (9:12)){
+  for (q in (9:12)){
+    mini_arima = Arima(mini_train, order = c(p,0,q), seasonal = c(0,1,1))
+    checkresiduals(mini_arima)
+  }
+}
+```
+```{r}
+nn_fit = nnetar(ts_train, size = 35, p = 10, P = 2)
+ypred = forecast(nn_fit, h = 96)$mean 
+
+
+check_residuals = function(ypred, ytrue, freq){
+  
+  
+  residuals = ypred - ytrue
+  
+  ts_res= ts(residuals,frequency = freq)
+  
+  
+  plot(ts_res)
+  
+  print(Box.test(ts_res, type = "Ljung-Box"))
+  print(ggAcf(ts_res))
+  print(ggPacf(ts_res))
+  
+}
+
+plot_forecast = function(train, test, pred, xlim = c(40, 55), title)
+{ 
+  plot(train, xlim = xlim, main = title)
+  lines(pred, col = "blue")
+  lines(test, col = "red")
+  legend("topright", 
+       legend = c("Train", "Forecast", "Test"), 
+       col = c("black", "blue", "red"), 
+       lty = 1)
+}
+
+plot_forecast(train = ts_train, test = ts_test, pred = ypred, title = "Neural Networks")
+check_residuals(ypred = ypred, ytrue = ts_test, freq = 96)
+
+
+```
+
+```{r}
+
+for (p in (5:10)){
+  for (q in (13:9)){
+    my_arima = Arima(ts_train, order = c(p,0,q), seasonal = c(0,1,1))
+    checkresiduals(my_arima)
+  }
+}
+
+```
+
+```{r}
+
+my_arima = Arima(ts_train, order = c(5,0,12), seasonal = c(0,1,2))
+checkresiduals(my_arima)
+
+```
+```{r}
+mini_train = window(ts, end = c(14, 96))[,"consumption"]
+
+
+for (p in (1:5)){
+  for (q in (8:1)){
+    mini_arima = Arima(mini_train, order = c(p,0,q), seasonal = c(1,1,2))5
+    checkresiduals(mini_arima)
+  }
+}
+```
+
+
+```{r}
+mini_train = window(ts, end = c(14, 96))[,"consumption"]
+
+
+for (p in (1:5)){
+  for (q in (8:1)){
+    mini_arima = Arima(mini_train, order = c(p,0,q), seasonal = c(1,1,2))
+    checkresiduals(mini_arima)
+  }
+}
+```
+
+
+```{r}
+summary(data)
+plot(data$consumption)
+train2 = data
+train2[!is.na(ts_train2$consumption) & ts_train2$consumption > 300, "consumption"] = 300
+train2[!is.na(ts_train2$consumption) & ts_train2$consumption < 160, "consumption"] = 160
+
+ts_train2 = ts(train2, frequency = 48)
+
+plot(ts_train2[,"consumption"])
+
+
+plot(decompose(ts_train2$consumption))
+
+```
+
+```{r}
+plot(ts(data$consumption))
+```
+```{r}
+data[,"time"] = as.POSIXct(data[,"time"], format="%m/%d/%Y %H:%M")
+data[,"weekday"] = weekdays(data[,"time"])
+data
+
+trend = decompose(ts_train)$random
+
+plot(trend, xlim = c(0,10))
+summary(trend)
+
+```
+
+
+
+
+```{r}
+
+ts_diff = diff(diff(ts_train,differences = 1),lag = 96,  differences = 1)
+
+plot(ts_train)
+plot(decompose(ts_train))
+ts_diff = diff(ts_train, differences = 1)
+plot(ts_diff)
+ts_diff = diff(diff(ts_train, differences = 1), lag = 96)
+plot(ts_diff)
+
+adf(ts_diff, criterion="AIC")
+
+```
+
+```{r}
+
+plot(ts_train)
+plot(decompose(ts_train))
+ts_diff = diff(ts_train, differences = 1, lag = 96)
+plot(ts_diff)
+
+adf(ts_diff, criterion="AIC")
+
+ggAcf(ts_diff)
+ggPacf(ts_train)
+
+```
+
+```{r}
+
+auto = auto.arima(ts_train, lambda = "auto")
+auto
+checkresiduals(auto)
+
+```
+
+```{r}
+fit = Arima(ts_train, order = c(5,0,0), seasonal = c(0,1,0))
+fit
+checkresiduals(fit)
+```
+FEATURE ENGINEERING
+
+```{r}
+
+data[,"time"] = as.POSIXct(data[,"time"], format="%m/%d/%Y %H:%M")
+data[,"demand"] = ifelse((format(data[,"time"], "%H:%M") >= "08:15") & (format(data[,"time"], "%H:%M") <= "17:00"),1,
+                         ifelse((format(data[,"time"], "%H:%M") >= "17:00") & (format(data[,"time"], "%H:%M") <= "23:00"),2,0)) #1 - high demand 0 - low demand
+
+
+
+
+
+data_clean = na.omit(data)
+ts = ts(data_clean, freq = 96)
+
+train_demand = window(ts, end = c(50, 91))
+test_demand = window(ts, start = c(50,92))
+
+
+autoDemand = auto.arima(train_demand[,"consumption"], xreg=train_demand[,"demand"], seasonal = TRUE)
+
+checkresiduals(autoDemand)
+autoDemand
+
+```
+
+```{r}
+arimafit = Arima(train_demand[,"consumption"], xreg=train_demand[,"demand"], order = c(1,1,2), seasonal = c(0,1,1))
+
+checkresiduals(arimafit)
+arimafit
+```
+

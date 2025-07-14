@@ -1,0 +1,1076 @@
+---
+title: "Time Series Assignment"
+author: "Carlos Eduardo Tussi Leite"
+output: pdf_document
+date: "2025-06-29"
+---
+
+
+
+1 - Data Loading
+2 - Data Preparations
+3 - EDA
+4 - Feature Engineer
+5 - Modeling
+  a) Cross-validation for each model
+      - SES
+      - SARIMA
+      - TSLM
+      - ML
+      - Neural Networks
+  
+  b) Model selection
+
+6 - Model selection
+7 - Export results
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(forecast)
+```
+
+# Data Preparation
+
+## Loading the Data
+
+```{r}
+data = read.csv("2025-06-Elec-train.csv")
+colnames(data) = c("time", "consumption", "temperature")
+nrow(data)
+
+```
+
+Data description
+```{r}
+summary(data)
+```
+Checking the NAs
+
+```{r}
+data[is.na(data$consumption), ]
+```
+
+#### Checking Outliers
+```{r}
+data[!is.na(data$consumption) & data$consumption == 0, ]
+```
+
+**Conclusions**
+- We can see that all the NA values for consumption are for the values we are trying to predict with our model.
+- Addition, we can identify possible outliers for the consumption variable, since we have some values that are zero.
+
+```{r}
+data[!is.na(data$consumption) & data$consumption == 0, ]
+```
+**Conclusion**
+We can see we have very few observations that have consumption zero that have a time frame of approximately 2 hours. It could indicate a blackout during that period or problem with the data collection.
+
+For these points, we will attribute the lower average bigger than zero.
+
+```{r}
+min_value = summary(data[!is.na(data$consumption) & data$consumption != 0, "consumption"])[1]
+data[!is.na(data$consumption) & data$consumption == 0, "consumption"] = min_value
+
+
+```
+
+
+
+
+```{r}
+  boxplot(data$consumption)
+```
+
+
+
+
+
+## Converting into Time Series (xts) for better identification of the period.
+
+xts: 
+   - time series to be used for the analysis
+   
+future_temperature_xts: 
+   - data to be used for predictions with covariate (temperature)
+```{r}
+library(xts)
+
+# Converting string into date-time format
+data[,"time"] = as.POSIXct(data[,"time"], format="%m/%d/%Y %H:%M")
+
+# Converting into xts without the variable "time"
+data_xts = xts(data[,-1], order.by = data$time, frequency = 96)
+future_temperature_xts = data_xts[is.na(data_xts),"temperature"]
+
+xts = na.omit(data_xts)
+
+head(xts)
+tail(xts)
+nrow(xts)
+nrow(future_temperature_xts)
+
+data
+
+```
+
+# Analysis
+
+```{r}
+
+plot(xts$consumption)
+plot(xts$consumption["2010-01-01 01:30:00/2010-01-02 01:30:00"])
+
+# Viewing as ts class
+plot(decompose(ts(xts$consumption, frequency = 96)))
+ggseasonplot(ts(xts$consumption, frequency = 96))
+
+
+ggAcf(ts(xts$consumption, frequency = 96))
+ggPacf(ts(xts$consumption, frequency = 96))
+```
+```{r}
+names(ggPacf(ts(xts$consumption, frequency = 96)))
+ggPacf(ts(xts$consumption, frequency = 96))
+```
+
+**Conclusions**
+1) Clear seasonal pattern of 1 day (24h*60min / 15min = 96)
+2) There seems to be a slight decrease in time that could be explained by the end of the winter maybe.
+3) Variance seems to be stable, so we assume homoscedasticity (no need for Box Cox)
+
+
+# Modeling
+
+
+Using "ts" object for the models (without Temperature)
+```{r}
+ts = ts(xts, frequency = 96)
+tail(ts)
+```
+
+
+
+Dividing train/test for quicker training (will be change to CV later on)
+
+```{r}
+ts_train = window(ts, end = c(50, 91))[,"consumption"]
+ts_test = window(ts, start = c(50,92))[,"consumption"]
+```
+
+
+Data frame that will contain all the errors for comparison
+```{r}
+errors_df = data.frame(
+  method = character(),
+  covariate = numeric(),
+  MSE = numeric()
+)
+```
+
+
+```{r}
+# This function calculates the MSE and saves in a data frame that will contain all the errors of this project for comparison at the end.
+new_error_row = function(error, model, is_covar)
+{
+  # Removing NAs
+  error = na.omit(error)
+  # Calculate the error
+  MSE = mean(error^2, na.rm=TRUE)
+ 
+  # generate new error row to be added to the errors df for comparison
+  new_error = data.frame(
+    method = model,
+    covariate = is_covar,
+    MSE = MSE
+  )
+  
+  # Print the current error information
+  cat(model)
+  if (is_covar){
+    cat(" - with Temperature: \n")
+  }
+  else
+  {
+    cat(": \n")
+  }
+  cat(MSE)
+  
+  return(new_error)
+  
+}
+```
+
+
+```{r}
+# Support function to calcualte the error with train and test set
+
+mse_error = function(y_pred, y_test){
+  mse = sqrt(mean((y_pred-y_test)^2))
+  return (mse)
+}
+```
+
+```{r}
+add_to_error_df = function(error, model, is_covar)
+{
+ 
+  # generate new error row to be added to the errors df for comparison
+  new_error = data.frame(
+    method = model,
+    covariate = is_covar,
+    MSE = error
+  )
+  
+  # Print the current error information
+  cat(model)
+  if (is_covar){
+    cat(" - with Temperature: \n")
+  }
+  else
+  {
+    cat(": \n")
+  }
+  cat(error)
+  
+  return(new_error)
+  
+}
+```
+
+
+## Without Temperature (err1_xxx)
+
+### Exponential Smoothing
+
+```{r}
+
+fit1_ses = ses(ts_train, h = 96)
+
+cat("SES MSE: ", mse_error(fit1_ses$mean, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error = mse_error(fit1_ses$mean, ts_test), model = "SES", is_covar = FALSE))
+errors_df
+
+plot(fit1_ses, xlim = c(40, 55))
+lines(ts_test, col = "red")
+legend("topright", 
+       legend = c("Train", "Forecast", "Test"), 
+       col = c("black", "blue", "red"), 
+       lty = 1)
+```
+
+
+
+Plotting forecast
+
+```{r}
+plot_forecast = function(train, test, pred, xlim = c(40, 55), title)
+{ 
+  plot(train, xlim = xlim, main = title)
+  lines(pred, col = "blue")
+  lines(test, col = "red")
+  legend("topright", 
+       legend = c("Train", "Forecast", "Test"), 
+       col = c("black", "blue", "red"), 
+       lty = 1)
+}
+```
+
+
+#### Auto arima
+
+```{r}
+fit1_auto_arima = auto.arima(ts_train, seasonal = TRUE, stepwise = TRUE, trace = TRUE)
+ypred = forecast(fit1_auto_arima, h = 96)$mean
+
+cat("Auto arima MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "Auto arima", is_covar = FALSE))
+errors_df
+
+
+plot_forecast(train = ts_train, test = ts_test, pred = ypred, title = "Auto Arima")
+checkresiduals(fit1_auto_arima)
+
+```
+
+
+IMPROVING AUTO ARIMA
+
+```{r}
+fit1_sarima001_111 = Arima(ts_train, order = c(2,1,5), seasonal = c(1,1,1))
+
+
+ypred = forecast(fit1_sarima001_111, h = 96)$mean
+cat("Sarima(5,0,0)(0,1,1) MSE: ", mse_error(ypred, ts_test))
+
+checkresiduals(fit1_sarima001_111)
+#Sarima(5,0,0)(0,1,1)
+
+```
+```{r}
+ar = c(1,2,3)
+ma = c(5,6,7)
+dif = c(1)
+
+best_ar = 0
+best_ma = 1
+best_dif = 1
+best_error = Inf
+
+for (p in ar){
+  for(q in ma){
+    for(d in dif){
+      fit = Arima(ts_train, order = c(p,d,q), seasonal = c(1,1,1))
+      mse = mse_error(forecast(fit, h = 96)$mean, ts_test)
+      cat("(", p, ", ", d, ", ", q, " --- Error: " , mse,"\n")
+      print(checkresiduals(fit))
+    }
+  }
+}
+
+
+```
+
+```{r}
+ar = c(2,3)
+ma = c(5,6,7)
+dif = c(1)
+
+best_ar = 0
+best_ma = 1
+best_dif = 1
+best_error = Inf
+
+for (p in ar){
+  for(q in ma){
+    for(d in dif){
+      fit = Arima(ts_train, order = c(p,d,q), seasonal = c(1,1,1))
+      mse = mse_error(forecast(fit, h = 96)$mean, ts_test)
+      cat("(", p, ", ", d, ", ", q, " --- Error: " , mse,"\n")
+      print(checkresiduals(fit))
+    }
+  }
+}
+
+```
+```{r}
+ar = c(2,3,4,5,6)
+ma = c(3,4,6,7,8)
+dif = c(1)
+D_ = c(2,1)
+Q_ = c(1,2,3)
+
+best_ar = 0
+best_ma = 1
+best_dif = 1
+best_error = Inf
+
+for (p in ar){
+  for(q in ma){
+    for(d in dif){
+      for(Q in Q_){
+        for(D in D_){
+            fit = Arima(ts_train, order = c(p,d,q), seasonal = c(0,D,Q))
+            mse = mse_error(forecast(fit, h = 96)$mean, ts_test)
+            cat("(", p, ", ", d, ", ", q, " --- Error: " , mse,"\n")
+            print(checkresiduals(fit))
+        }
+      }
+
+    }
+  }
+}                                                                                                                                                                                                                                                                                                                                                                                   
+```
+
+```{r}
+ar = c(2,3,4,5,6)
+ma = c(3,4,6,7,8)
+dif = c(1)
+
+best_ar = 0
+best_ma = 1
+best_dif = 1
+best_error = Inf
+
+for (p in ar){
+  for(q in ma){
+    for(d in dif){
+      fit = Arima(ts_train, order = c(p,d,q), seasonal = c(0,1,0))
+      mse = mse_error(forecast(fit, h = 96)$mean, ts_test)
+      cat("(", p, ", ", d, ", ", q, " --- Error: " , mse,"\n")
+      print(checkresiduals(fit))
+    }
+  }
+}
+```
+
+
+
+
+1) Identify there is seasonality with pltos
+2) Decide to try SARIMA
+3) Try SARIMA (p,d,0)(P, D, Q) or SARIMA (0,d, q)(0, D, Q) to use the Acg and Pacg
+4) Try different options of parameters
+
+
+IMPROVING AUTO ARIMA
+
+
+
+
+
+#### SARIMA
+
+Transforming into stationary
+```{r}
+
+#013 111
+#500 010
+ts_diff = diff(diff(ts_train,differences = 1),lag = 96,  differences = 2)
+
+plot(ts_diff)
+ggAcf(ts_diff, lag = 96*3)
+ggPacf(ts_diff, lag = 96*3)
+
+
+ts_diff = diff(diff(ts_train,differences = 1,lag = 96),  differences = 2)
+
+plot(ts_diff)
+ggAcf(ts_diff, lag = 96*3)
+ggPacf(ts_diff, lag = 96*3)
+```
+```{r}
+fitNew = Arima(ts_train, order = c(5,0,0), seasonal = c(0,1,1))
+ypred = forecast(fitNew, h = 96)$mean
+mse = mse_error(ypred, ts_test)
+mse
+
+plot_forecast(train = ts_train, test = ts_test, pred = ypred, title = "ARIMA(0,2,14)(0,1,0)[12]")
+checkresiduals(fitNew)
+
+```
+```{r}
+fitme = auto.arima(ts_train, seasonal = TRUE, stationary = FALSE)
+checkresiduals(fitme)
+
+```
+
+
+**Important**
+This correlation in the residuals might indicate that we need to consider covariates in order to better capture the changes.
+
+
+SARIMA MODEL
+```{r}
+fit1_sarima213_010 = Arima(ts_train, order = c(2,1,3), seasonal = c(0,1,0))
+
+ypred = forecast(fit1_sarima213_010, h = 96)$mean
+cat("Sarima(2,1,3)(0,1,0) MSE: ", mse_error(ypred, ts_test))
+
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "Sarima(2,1,3)(0,1,0)", is_covar = FALSE))
+
+ts_diff = diff(diff(ts_train, lag = 96))
+
+plot(ts_diff)
+ggAcf(ts_diff, lag = 500)
+ggPacf(ts_diff, lag = 500)
+
+checkresiduals(fit1_sarima213_010)
+
+errors_df
+
+
+plot_forecast(train = ts_train, test = ts_test, pred = ypred, title = "Sarima(2,1,3)(0,1,0)")
+
+```
+
+SARIMA 2
+```{r}
+fit1_sarima213_011 = Arima(ts_train, order = c(2,1,3), seasonal = c(0,1,1))
+
+ypred = forecast(fit1_sarima213_011, h = 96)$mean
+cat("Sarima(2,1,3)(0,1,1) MSE: ", mse_error(ypred, ts_test))
+
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "Sarima(2,1,3)(0,1,1)", is_covar = FALSE))
+
+ts_diff = diff(diff(ts_train, lag = 96))
+
+plot(ts_diff)
+ggAcf(ts_diff, lag = 500)
+ggPacf(ts_diff, lag = 500)
+
+checkresiduals(fit1_sarima213_011)
+
+plot_forecast(train = ts_train, test = ts_test, pred = ypred, title = "Sarima(2,1,3)(0,1,1)")
+
+errors_df
+```
+
+
+### tsml
+
+```{r}
+
+fit1_tslm = tslm(consumption~trend+season,data=window(ts, end = c(50, 91)))
+ypred = forecast(fit1_tslm, h = 96)$mean
+
+cat("tsml MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "TSML", is_covar = FALSE))
+
+checkresiduals(fit1_tslm)
+
+plot_forecast(train = ts_train, test = ts_test, pred = ypred, title = "TSML")
+
+errors_df
+
+```
+
+
+### ML
+
+Data Transfrmation into ML dataset
+
+```{r}
+
+
+# We transform everything in vector
+ts_vector = as.vector(ts_train)
+
+# Get the first row (in vector form) to start the iteration
+ml_train = ts_vector[1:97]
+
+# For each element of t he vector, generate a new row with a response columns added
+for(i in 1:(length(ts_vector)-97))
+{
+  ml_train = rbind(ml_train, as.vector(ts_vector[(i+1):(i+97)]))
+}
+
+
+
+cat("The result is of class: ", class(ml_train))
+
+
+```
+
+```{r}
+
+predMl = function(h, freq, pred_start,train, model, matrix = FALSE)
+{
+  pred = rep(NULL, h)
+
+  # The first prediction will be the last row of  the training data set. 
+  newdata = t(tail(train, freq))
+  for (t in 1:(h)){
+    
+    # To deal with the cases where we need to have a matrix for prediction (like in SVM)
+    if(matrix == TRUE)
+    {
+      newdata = matrix(newdata,1,freq)
+    }
+    pred[t] = predict(model, newdata = newdata)
+    
+    # The following element forecast will be from the second element until the previously predicted value (and so on)
+    newdata = c(newdata[-1],pred[t])
+  
+  }
+  
+  # Finally, we transform the predictions into a Time-Series again
+  pred_ts = ts(pred, start = pred_start, freq = freq)
+  
+  return(pred_ts)
+  
+}
+
+
+```
+
+Checking Residuals
+```{r}
+check_residuals = function(ypred, ytrue, freq){
+  
+  
+  residuals = ypred - ytrue
+  
+  ts_res= ts(residuals,frequency = freq)
+  
+  
+  plot(ts_res)
+  
+  print(Box.test(ts_res, type = "Ljung-Box"))
+  print(ggAcf(ts_res))
+  print(ggPacf(ts_res))
+  
+}
+
+
+```
+
+
+Random Forest
+```{r}
+# start = c(50,92)
+
+library(randomForest)
+
+fitRF = randomForest(x = ml_train[,-97], y=ml_train[,97])
+
+ypred = predMl(h = 96, freq = 96, pred_start = c(50,92), train = ts_train, model = fitRF)
+
+cat("Random Forest MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "Random Forest", is_covar = FALSE))
+errors_df
+
+
+plot_forecast(train = ts_train, test = ts_test, pred = ypred, title = "Random Forest")
+
+check_residuals(ypred = ypred, ytrue = ts_test, freq = 96)
+
+```
+
+
+
+SVM
+```{r}
+
+library(e1071)
+
+fitSVM = svm(x = ml_train[,-97], y = ml_train[,97])
+
+ypred = predMl(h = 96, freq = 96, pred_start = c(50,92), train = ts_train, model = fitSVM, matrix = TRUE)
+
+cat("SVM MSE: ", mse_error(ypred, ts_test))
+
+checkresiduals(fitSVM)
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "SVM", is_covar = FALSE))
+errors_df
+
+plot_forecast(train = ts_train, test = ts_test, pred = ypred, title = "SVM")
+
+check_residuals(ypred = ypred, ytrue = ts_test, freq = 96)
+
+```
+
+Gradient Boosting
+```{r}
+
+library(xgboost)
+
+fitXG = xgboost(data = ml_train[,-97], label = ml_train[,97],
+max_depth = 10, eta = .5, nrounds = 50,
+nthread = 2, objective = "reg:squarederror", verbose = FALSE)
+
+ypred = predMl(h = 96, freq = 96, pred_start = c(50,92), train = ts_train, model = fitXG, matrix = TRUE)
+
+cat("XGBoost MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "XGBoost", is_covar = FALSE))
+errors_df
+
+plot_forecast(train = ts_train, test = ts_test, pred = ypred, title = "XGBoost")
+
+check_residuals(ypred = ypred, ytrue = ts_test, freq = 96)
+
+```
+
+
+
+#### Neural Networks
+
+```{r}
+
+fit1_nn = nnetar(ts_train, size = 35, p = 10, P = 2)
+
+ypred = forecast(fit1_nn, h = 96)$mean
+
+cat("NN MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "Neural Network", is_covar = FALSE))
+errors_df
+
+plot_forecast(train = ts_train, test = ts_test, pred = ypred, title = "Neural Networks")
+
+check_residuals(ypred = ypred, ytrue = ts_test, freq = 96)
+
+```
+
+
+########################################################################################################################################################################
+########################################################################################################################################################################
+########################################################################################################################################################################
+
+
+## With Temperature (err2_xxx)
+
+```{r}
+ts_train = window(ts, end = c(50, 91))
+ts_test = window(ts, start = c(50,92))[,"consumption"]
+
+future_temperature_ts = ts(future_temperature_xts)[,"temperature"]
+
+head(ts_train)
+head(ts_test)
+head(future_temperature_ts)
+```
+
+
+Temperature and consumption analysis
+```{r}
+
+plot(ts_train[,"consumption"], ts_train[,"temperature"], pch = 19, col = "green")
+
+plot(ts_train[,"consumption"], xlim = c(0,10))
+lines(ts_train[,"temperature"], col = "red")
+
+
+plot(ts_train[,"temperature"])
+
+cat("Correlation: ", cor(ts_train[,"consumption"], ts_train[,"temperature"]))
+```
+There seems to be a relation between a a high in temperature and an increase in the energy consumption.
+
+
+Creating cluster
+```{r}
+cluster_feature =kmeans(,centers=k)
+```
+
+
+
+Auto arima
+```{r}
+
+fit2_auto_arima = auto.arima(ts_train[,"consumption"], xreg = ts_train[,"temperature"])
+
+ypred = forecast(fit2_auto_arima, xreg = future_temperature_ts)$mean
+
+cat("Auto arima XREG - MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "Auto arima", is_covar = TRUE))
+errors_df
+
+
+plot_forecast(train = ts_train[,"consumption"], test = ts_test, pred = ypred, title = "Auto arima [TEMP]")
+
+```
+
+
+
+SARIMA model
+
+```{r}
+
+fit2_sarima213_010 = Arima(ts_train[,"consumption"], order = c(2,1,3), seasonal = c(0,1,0), xreg = ts_train[,"temperature"] )
+
+ypred = forecast(fit2_sarima213_010, xreg = future_temperature_ts)$mean
+cat("Sarima(2,1,3)(0,1,0) XREG - MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "Sarima(2,1,3)(0,1,0)", is_covar = TRUE))
+errors_df
+
+checkresiduals(fit2_sarima213_010)
+
+plot_forecast(train = ts_train[,"consumption"], test = ts_test, pred = ypred, title = "Sarima(2,1,3)(0,1,0) [TEMP]")
+
+```
+
+
+Neural Network
+
+```{r}
+
+fit2_nn = nnetar(ts_train[,"consumption"], xreg = ts_train[,"temperature"])
+
+ypred = forecast(fit2_nn, h = 96,  xreg = future_temperature_ts)$mean
+
+cat("NN MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "Neural Network", is_covar = TRUE))
+errors_df
+
+plot_forecast(train = ts_train[,"consumption"], test = ts_test, pred = ypred, title = "Neural Netwrok [TEMP]")
+
+check_residuals(ypred = ypred, ytrue = ts_test, freq = 96)
+
+```
+
+
+### ML
+
+Data Transformation into ML data set, including the temperature as the 97th variable. 98th variable is the X_T+1
+
+```{r}
+xreg_future = future_temperature_ts
+
+vec_train = as.vector(ts_train[,"consumption"])
+vec_xreg = as.vector(ts_train[,"temperature"])
+
+ml_train = c(vec_train[1:97], vec_xreg[96])
+
+# Swapping columns, placing the response variable as the last column]
+swap = vec_xreg[96]
+ml_train[98] =  ml_train[97]
+ml_train[97] = swap
+
+for(i in 1:(length(vec_train)-97))
+{
+    newdata = c(vec_train[(i+1):(i+97)],vec_xreg[i+96])
+    swap = vec_xreg[i+96]
+    newdata[98] = newdata[97]
+    newdata[97] = swap
+    
+    ml_train = rbind(ml_train, newdata)
+}
+
+```
+```{r}
+
+```
+
+
+Support function to predict with covariates
+```{r}
+predMl_xreg = function(h, freq, pred_start,train, xreg_data, model, matrix = FALSE)
+{
+  pred = rep(NULL, h)
+  # The first prediction will be the last row of  the training data set. 
+  newdata = c(tail(train, freq), xreg_data[1])
+  
+  for (t in 1:(h)){
+    
+    # To deal with the cases where we need to have a matrix for prediction (like in SVM)
+    if(matrix == TRUE)
+    {
+      newdata = matrix(newdata,1,freq+1) #+1 to account for the xreg
+    }
+    pred[t] = predict(model, newdata = newdata)
+    
+    # The following element forecast will be from the second element until the previously predicted value (and so on)
+    if(t+1 <= length(xreg_data)){
+      # Remove the first and last (temperature) element
+      newdata = newdata[-c(1, length(newdata))]
+      # Add new prediction and new future temperature value
+      newdata = c(newdata, pred[t], xreg_data[t+1])
+    }
+  }
+  
+  # Finally, we transform the predictions into a Time-Series again
+  pred_ts = ts(pred, start = pred_start, freq = freq)
+  
+  return(pred_ts)
+  
+}
+```
+
+
+
+Random Forest
+```{r}
+# start = c(50,92)
+
+library(randomForest)
+
+fit2RF = randomForest(x = ml_train[,-98], y=ml_train[,98], ntree = 1000)
+
+ypred = predMl_xreg(h = 96, freq = 96, pred_start = c(50,92), train = ts_train[,"consumption"], xreg_data = xreg_future,model = fit2RF)
+
+cat("Random Forest with XREG MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "Random Forest", is_covar = TRUE))
+errors_df
+
+plot_forecast(train = ts_train[,"consumption"], test = ts_test, pred = ypred, title = "Random Forest [TEMP]")
+
+
+
+# Tuning Random Forest
+best_Result = tuneRF(x = ml_train[,-98], y=ml_train[,98], ntreeTry = 100, improve = 0.01, doBest = TRUE)
+
+ypred = predMl_xreg(h = 96, freq = 96, pred_start = c(50,92), train = ts_train[,"consumption"], xreg_data = xreg_future,model = best_Result)
+cat("Random Forest with TUNED XREG MSE: ", mse_error(ypred, ts_test))
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "Random Forest Tuned", is_covar = TRUE))
+errors_df
+plot_forecast(train = ts_train[,"consumption"], test = ts_test, pred = ypred, title = "Random Forest Tuned [TEMP]")
+
+
+
+check_residuals(ypred = ypred, ytrue = ts_test, freq = 96)
+```
+
+
+SVM
+```{r}
+library(e1071)
+
+fit2SVM = svm(x = ml_train[,-98], y = ml_train[,98])
+
+ypred = predMl_xreg(h = 96, freq = 96, pred_start = c(50,92), train = ts_train[,"consumption"], xreg_data = xreg_future, model = fit2SVM, matrix = TRUE)
+
+cat("SVM Xreg MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "SVM", is_covar = TRUE))
+errors_df
+
+plot_forecast(train = ts_train[,"consumption"], test = ts_test, pred = ypred, title = "SVM [TEMP]")
+
+check_residuals(ypred = ypred, ytrue = ts_test, freq = 96)
+```
+
+Gradient Boosting
+```{r}
+
+library(xgboost)
+
+fit2XG = xgboost(data = ml_train[,-98], label = ml_train[,98],
+max_depth = 10, eta = .5, nrounds = 50,
+nthread = 2, objective = "reg:squarederror", verbose = FALSE)
+
+ypred = predMl_xreg(h = 96, freq = 96, pred_start = c(50,92), train = ts_train[,"consumption"], xreg_data = xreg_future, model = fit2XG, matrix = TRUE)
+
+cat("XGBoost XREG MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "XGBoost", is_covar = TRUE))
+print(errors_df)
+
+plot_forecast(train = ts_train[,"consumption"], test = ts_test, pred = ypred, title = "XGBoost [TEMP]")
+
+check_residuals(ypred = ypred, ytrue = ts_test, freq = 96)
+
+```
+
+
+
+### TSML with temperature
+
+```{r}
+
+fit2_tslm = tslm(consumption~temperature+trend+season,data=window(ts, end = c(50, 91)))
+ypred = forecast(fit2_tslm, newdata = data.frame(temperature = future_temperature))$mean
+
+cat("tsml XREG MSE: ", mse_error(ypred, ts_test))
+
+errors_df = rbind(errors_df, add_to_error_df(error =  mse_error(ypred, ts_test), model = "TSML", is_covar = TRUE))
+
+checkresiduals(fit2_tslm)
+
+errors_df
+
+plot_forecast(train = ts_train[,"consumption"], test = ts_test, pred = ypred, title = "TSML [TEMP]")
+
+```
+
+
+# Comparing results
+
+```{r}
+
+sorted_error = errors_df[order(errors_df$MSE), ]
+sorted_error
+```
+
+
+
+
+
+# Writing excel file
+
+
+Preparing the dataset
+```{r}
+ypred = forecast(fit1_sarima213_010, h = 96)$mean
+ypred_temperature = forecast(fit2_sarima213_010, xreg = future_temperature_ts)$mean
+
+forescasts = data.frame(
+    withoutTemp = ypred,
+    withTemp = ypred_temperature
+  )
+
+```
+
+
+Saving Excell File
+```{r}
+library(openxlsx)
+
+write.xlsx(forescasts, "CarlosTussiLeite.xlsx", colNames = FALSE)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Exponential Smoothing
+
+Since we have no apparent trend, we only test with the Simple Exponential Smoothing
+
+#### SES
+```{r}
+ses_cv = function(x, h){forecast(ses(x, h = 96), h=h)}
+
+err1_ses = tsCV(ts[,"consumption"], ses_cv, h = 96)
+
+errors_df = rbind(errors_df, new_error_row(error = err1_ses, 
+                                           model = "SES", 
+                                           is_covar = FALSE))
+```
+#### AR / MA
+
+```{r}
+ggAcf(ts[,"consumption"])
+ggPacf(ts[,"consumption"])
+
+ts_diff = diff(ts[,"consumption"], lag = 96)
+
+plot(ts_diff)
+ggAcf(ts_diff)
+ggPacf(ts_diff)
+
+```
+```{r}
+
+Arima(ts[,"consumption"], order = c(0,0,0), seasonal = c(0,1,1))
+```
+
+
+#### SARIMA models
+```{r}
+sarima_cv = function(x, h){forecast(Arima(x, order = c(0,0,0), seasonal = c(0,1,1)),h=h)}
+
+err1_ses = tsCV(ts[,"consumption"], sarima_cv, h = 96, initial = 20*96)
+
+errors_df = rbind(errors_df, new_error_row(error = err1_ses, 
+                                           model = "SARIMA(0,0,0)(0,1,1)", 
+                                           is_covar = FALSE))
+
+
+```
+
