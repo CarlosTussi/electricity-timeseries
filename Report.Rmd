@@ -10,6 +10,12 @@ editor_options:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library(dplyr) 
+library(forecast)
+library(openxlsx)
+library(e1071)
+library(xgboost)
+library(randomForest)
 ```
 
 # Electricity Consumption Time-Series Analysis and Forecast
@@ -27,7 +33,7 @@ knitr::opts_chunk$set(echo = TRUE)
         -   [Pre-Processed Time Series Data](#pre-processed-data)
         -   [Data Split](#data-split)
 -   [Modeling](#modeling)
-    -   [Without Covariate](#without-covariate)
+    -   [Without Temperature Covariate](#without-covariate)
         -   [ExponentialSmoothin](#exponential-smoothing)
         -   [SARIMA](#sarima-without-covariate)
         -   [TSLM](#tslm-without-covariate)
@@ -36,7 +42,7 @@ knitr::opts_chunk$set(echo = TRUE)
             -   [XGBoost](#xgboost-without-covariate)
             -   [SVM](#svm-without-covariate)
             -   [Neural Networks](#nn-without-covariate)
-    -   [With Covariate](#with-covariate)
+    -   [With Temperature Covariate](#with-covariate)
         -   [SARIMA](#sarima-with-covariate)
         -   [TSLM](#tslm-with-covariate)
         -   [Machine Learning Models](#mlmodels-with-covariate)
@@ -54,64 +60,863 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Data {#data}
 
+Loading the data
+```{r}
+library(forecast)
+
+data = read.csv("2025-06-Elec-train.csv")
+
+head(data)
+tail(data)
+summary(data)
+
+# Changing column names for convenience
+colnames(data) = c("time", "consumption", "temperature")
+
+
+```
+
+
 ### Overview {#overview}
+
+- The dataset contains 4987 observations that corresponds to observations measured at every 15 minutes. 
+- Also, we can see the presence of 96 missing values for consumption that need to be further investigated.
+
 
 ### Missing Values {#missing-values}
 
+We can see that the 96 missing values for consumption are the ones to be predicted by our best model at the end, so the missing values do not need to be imputed.
+
+```{r}
+ 
+
+cat("First NA: ", head(data[is.na(data$consumption), ],1)$time, "\n")
+cat("Last NA:  ", tail(data[is.na(data$consumption), ],1)$time)
+
+```
+
 ### Time-Series Data {#time-series-data}
+
+Converting the data into time series and separating the future values of temperature.
+
+```{r}
+
+# Ignore the NAs observations
+ts = ts(na.omit(data), frequency = 96)
+
+# Preparing future temperature data for prediction with covariate
+ts_future_temp = data[is.na(data$consumption),"temperature"]
+
+head(ts)
+summary(ts)
+
+head(ts_future_temp)
+length(ts_future_temp)
+```
 
 ### EDA {#eda}
 
+- Clear seasonal pattern of 1 day (24h*60min / 15min = 96)
+- Different energy consumption levels during the day (lowest in the night, increase in the morning and peak end of the day)
+- There seem to be no apparent trend, except for a slight decrease at the end that does not seem to be very significant.
+- Except for a big spike towards the end of the series, which might indicate the presence of outliers, variance seems to be stable, so we assume homoscedasticity.
+- The time series is clearly not stationary.
+
+
+
+```{r}
+plot(ts[,"consumption"], main = "Consumption Time-Series")
+
+plot(decompose(ts[,"consumption"]))
+ggseasonplot(ts[,"consumption"])
+
+ggAcf(ts[,"consumption"])
+ggPacf(ts[,"consumption"])
+```
+
+Obervations with zero consumption:
+
+We can see we have very few observations that have consumption zero that have a time frame of approximately 2 hours. It could indicate a blackout during that period or problem with the data collection. For these points, the lower average bigger than zero will be attributed.
+```{r}
+
+ts[ts[,"consumption"] == 0, ]
+
+```
+
+Time series after removing initial outliers
+```{r}
+min_value = summary(ts[ts[,"consumption"] != 0, "consumption"])[1]
+
+# Update the time series
+ts[ts[,"consumption"] == 0, "consumption"] = min_value
+
+# Update the initial data set
+data[!is.na(data$consumption) & data$consumption == 0, "consumption"] = min_value
+
+plot(ts[,"consumption"], main = "Consumption Time-Series wihtout zeros")
+```
+
+
+
 ### Features Engineering
 
-### Outliers {#outliers}
+
+
+Using POSIXct library to better interpret the days of the week and time
+```{r}
+data[,"time"] = as.POSIXct(data[,"time"], format="%m/%d/%Y %H:%M")
+```
+
+
+Weekend Effect Analysis
+```{r}
+# Create Weekday feature
+data["weekday"] = weekdays(data[,"time"])
+
+# Flag if it's weekend
+data["is_weekend"] = ifelse(data[,"weekday"] %in% c("Thursday", "Friday"), 1, 0)
+
+# Transform into factors
+data_cpy = data
+data_cpy[,"weekday"] = factor(data[,"weekday"], levels = c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"), ordered = TRUE)
+
+# Encoding Weekday features to test it as covariate
+data[,"weekday0"] = 0
+data[,"weekday1"] = 0
+data[,"weekday2"] = 0
+
+data[,"weekday0"] = ifelse(data[,"weekday"] %in% c("Monday", "Wednesday", "Friday"),0,1)
+data[,"weekday1"] = ifelse(data[,"weekday"] %in% c("Wednesday", "Thursday", "Sunday"),1,0)
+data[,"weekday2"] = ifelse(data[,"weekday"] %in% c("Friday", "Saturday", "Sunday"),1,0)
+
+
+# Consumption per weekday
+boxplot(consumption ~ weekday, data = data_cpy, main = "Consumption per Weekday", las = 3, xlab = "")
+```
+Demand period analysis (Low, Medium and High demand)
+
+As we can see from the seasonality plot, we have three main different patterns of energy demand that are roughly classified as:
+
+- Low: 23:15 until 08:00
+
+- Medium: 08:15 until 17:00
+
+- High: 17:15 until 23:00
+
+```{r}
+mean_consumption = data %>% group_by(format(time, "%H:%M:%S")) %>%  summarise(mean_consump = mean(consumption, na.rm = TRUE))
+colnames(mean_consumption) = c("time","mean")
+
+transitions = list("08:00:00", "08:15:00","17:00:00","17:15:00", "23:00:00", "23:15:00")
+
+mean_consumption[mean_consumption$time %in% transitions, ]
+
+
+```
+
+Creating "demand" feature to represent this changes in demand
+
+```{r}
+
+# 0 - 23:15 - 08:00  (Low)
+# 1 - 08:15 - 17:00  (Peak 1)
+# 2 - 17:15 - 23:00  (Peak 2)
+
+data[,"demand"] = ifelse((format(data[,"time"], "%H:%M") >= "08:15") & (format(data[,"time"], "%H:%M") <= "17:00"),1,
+                         ifelse((format(data[,"time"], "%H:%M") >= "17:15") & (format(data[,"time"], "%H:%M") <= "23:00"),2,0)) 
+
+boxplot(consumption ~ demand, data = data,
+        main = "Demand Category Distribution",
+        xlab = "Demand Category",
+        ylab = "Consumption")
+
+# Encoding demand column
+data[,"demand0"] = ifelse(data[,"demand"] == 0, 0, 1)
+data[,"demand1"] = ifelse(data[,"demand"] == 2, 1, 0)
+
+```
+
+
+- We can see that for the category 2 there are quite a lot of outliers, which can explain some days where the abrupt drop from demand high peak 2 to low demand happened before
+the pre-defined cutoff time (23:15)
+
+Option 1: Re-label those categories to the correct one. Problem = Impossible to use it as external feature, since we will not know the consumption to correctly label the demand.
+Option 2: Treat them as outliers. This approach seems to be more adequate, since we can keep classifying the demand according to the time of the day.
+
+Testing Option 2
+
+```{r}
+library(dplyr) 
+# 1) Identify those observations that are mislabeled
+# 2) Replace those days with the mean for all the days if lower value outliers
+# 3) Replace those days with the third quantile for all the days if higher value outliers
+
+# For each time period of the day (regardless of the day of the week at this point) calculate the respective mean and the respective 3rd quantile.
+
+# Calcualate the mean for
+time_means = data %>% group_by(format(time, "%H:%M:%S")) %>%  summarise(mean_consump = mean(consumption, na.rm = TRUE))
+colnames(time_means) = c("time", "mean")
+
+# Calculate third quantiles
+thrid_quantiles =data %>% group_by(format(time, "%H:%M:%S")) %>%  summarise(third_quantile = quantile(consumption, 0.75, na.rm = TRUE))
+colnames(thrid_quantiles) = c("time", "third quantile")
+
+# Add a table with the observation mean for an observation considering the time only and not the days
+data[,"time_HMS"] = format(data[,"time"],"%H:%M:%S")
+data = left_join(data, time_means, by = c("time_HMS" = "time"))
+data = left_join(data, thrid_quantiles, by = c("time_HMS" = "time"))
+#data[,c("time", "time_HMS", "consumption", "mean")]
+
+
+# Defining mean threshold
+high_peak_mean = pull(time_means[time_means$time == "23:00:00" , "mean"])
+medium_peak_mean = pull(time_means[time_means$time == "08:15:00" , "mean"])
+low_peak_mean = pull(time_means[time_means$time == "01:15:00" , "mean"])
+
+
+# Replacing values if lower than threshold (mean)
+data[,"consumption"] = ifelse((data$consumption < high_peak_mean) & (data$demand == 2),
+                              data[,"mean"],
+                              data[,"consumption"])
+
+data[,"consumption"] = ifelse((data$consumption < medium_peak_mean) & (data$demand == 1),
+                              data[,"mean"],
+                              data[,"consumption"])
+
+data[,"consumption"] = ifelse((data$consumption < low_peak_mean) & (data$demand == 0),
+                              data[,"mean"],
+                              data[,"consumption"])
+
+
+# Replacing values if higher than threshold (3rd quantile)
+data[,"consumption"] = ifelse((data$consumption > data[,"third quantile"]) & (data$demand == 2),
+                              data[,"third quantile"],
+                              data[,"consumption"])
+
+data[,"consumption"] = ifelse((data$consumption > data[,"third quantile"]) & (data$demand == 1),
+                              data[,"third quantile"],
+                              data[,"consumption"])
+
+data[,"consumption"] = ifelse((data$consumption > data[,"third quantile"]) & (data$demand == 0),
+                              data[,"third quantile"],
+                              data[,"consumption"])
+
+# Verifying results
+boxplot(consumption ~ demand, data = data,
+        main = "Demand Category Distribution after Transformation",
+        xlab = "Demand Category",
+        ylab = "Consumption")
+
+```
+
+# Preparing XREG covariates that will be used for testing
+```{r}
+
+xregs = data.frame(matrix(ncol = 0, nrow = 96))
+
+# Temperature
+xregs[,"tempearture"] = ts_future_temp
+
+# Day of the week (ordinal)
+xregs[,"weekday"] = factor(data[is.na(data$consumption),"weekday"], levels = c("Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"), ordered = TRUE)
+
+# Day of the week (one-hot encoded)
+xregs[,"weekday0"] = ifelse(weekdays(as.Date("2010-02-21")) %in% c("Monday", "Wednesday", "Friday"),0,1)
+xregs[,"weekday1"] = ifelse(weekdays(as.Date("2010-02-21")) %in% c("Wednesday", "Thursday", "Sunday"),1,0)
+xregs[,"weekday2"] = ifelse(weekdays(as.Date("2010-02-21")) %in% c("Friday", "Saturday", "Sunday"),1,0)
+
+
+
+# Demand level (ordinal)
+xregs[,"demand"] = ifelse((format(data[is.na(data$consumption), "time"], "%H:%M") >= "08:15") & (format(data[is.na(data$consumption), "time"], "%H:%M") <= "17:00"),1,
+                         ifelse((format(data[is.na(data$consumption), "time"], "%H:%M") >= "17:15") & (format(data[is.na(data$consumption), "time"], "%H:%M") <= "23:00"),2,0)) 
+
+# Demand level (one-hot encoded)
+xregs[,"demand0"] = ifelse(xregs[,"demand"] == 0, 0, 1)
+xregs[,"demand1"] = ifelse(xregs[,"demand"] == 2, 1, 0)
+
+```
 
 ### Pre-processed data {#pre-processed-data}
 
+```{r}
+# Remove NAs from future temperature
+data_clean = na.omit(data)
+
+# Convert imto Time Series
+ts = ts(data_clean[,-1], freq = 96) # Removing time columns
+
+# Plot clean Time-Series data
+ggseasonplot(ts[,"consumption"], main = "Seasonal Full Dataset")
+plot(ts[,c("consumption", "temperature")], main = "Full Data Set")
+plot(decompose(ts[,"consumption"]))
+```
+
+
 ### Data Split {#data-split}
+
+- Initially, to select the best model type, the time series will be splitted into train and test set.
+- After hyper tuning and comparison with all models, the best model will be cross-validated to ensure that it did not overfit our data.
+- The cross-validation is done at the end of this report.
+
+
+Performing a 80/20 split
+```{r}
+# Roughly 80/20 split
+ts_train = window(ts, end = c(40, 96))
+ts_test = window(ts, start = c(41,1))
+test_horizon = length(ts_test[,"consumption"])
+
+
+ggseasonplot(ts_train[,"consumption"], main = "Train Data Set Seasonal Plot")
+plot(ts_train[,c("consumption", "temperature")], main = "Train Data Set")
+plot(decompose(ts_train[,"consumption"]))
+
+```
+The resulting train sample seems to be representative of the previous plots.
 
 ## Modeling {#modeling}
 
-### Without Covariate {#without-covariate}
+The best model selection was divided into two parts: without using temperature covariate and with the temperature covariate as part of the model training.
+For each model trained, the error is collected for comparison at the end.
+
+Data frame that will contain all the errors for comparison
+```{r}
+errors_df = data.frame(
+  method = character(),
+  covariate = numeric(),
+  MSE = numeric()
+)
+```
+
+Support functions used with different models
+```{r}
+# Support function to calcualte the error with train and test set
+
+mse_error = function(y_pred, y_test){
+  mse = sqrt(mean((y_pred-y_test)^2))
+  return (mse)
+}
+```
+
+
+```{r}
+# Manually check residuals for some models (like neural networks)
+check_residuals = function(ypred, ytrue, freq){
+  
+  
+  residuals = ypred - ytrue
+  
+  ts_res= ts(residuals,frequency = freq)
+  
+  
+  plot(ts_res)
+  
+  print(Box.test(ts_res, type = "Ljung-Box"))
+  print(ggAcf(ts_res))
+  print(ggPacf(ts_res))
+  
+}
+```
+
+```{r}
+# This function plots the predicted forecast and the true forecastg from the test set
+plot_forecast = function(train, test, pred, xlim = c(40, 55), title)
+{ 
+  plot(train, xlim = xlim, main = title)
+  lines(pred, col = "blue")
+  lines(test, col = "red")
+  legend("topright", 
+       legend = c("Train", "Forecast", "Test"), 
+       col = c("black", "blue", "red"), 
+       lty = 1)
+}
+```
+
+### Without Temperature Covariate {#without-covariate}
+
+
 
 #### Exponential Smoothing {#ses-without-covariate}
 
+```{r}
+# Train and Forecast
+fit_ses = ses(ts_train[,"consumption"], h = test_horizon)
+pred = fit_ses$mean
+
+# Save Error
+mse = mse_error(fit_ses$mean, ts_test[,"consumption"])
+cat("SES MSE: ",  mse, "\n")
+errors_df = rbind(errors_df, data.frame(
+                                        method = "SES",
+                                        covariate = FALSE,
+                                        MSE = mse))
+
+# Plot Forecast
+plot_forecast(train = ts_train[,"consumption"], test = ts_test[,"consumption"], pred = pred, xlim = c(40, 55), title = "SES Forecast")
+```
+
 #### Sarima {#sarima-without-covariate}
+
+```{r}
+
+```
+
 
 #### TSLM {#tslm-without-covariate}
 
+```{r}
+# Fit
+tslm_fit = tslm(consumption~trend+season,data= ts_train)
+
+# Forecast
+pred = forecast(tslm_fit, h = test_horizon)$mean
+
+#Calculate error
+mse =  mse_error(pred, ts_test[,"consumption"])
+cat("tsml MSE: ", mse, "\n")
+errors_df = rbind(errors_df, data.frame(
+                                        method = "TSLM",
+                                        covariate = FALSE,
+                                        MSE = mse))
+
+checkresiduals(tslm_fit)
+
+plot_forecast(train = ts_train[,"consumption"], test = ts_test[,"consumption"], pred = pred, title = "TSML")
+
+```
+
+
 #### Machine Learning Models {#mlmodels-without-covariate}
+
+Support functions
+
+```{r}
+# Forecast function for machine learning models
+predMl = function(h, freq, pred_start,train, model, matrix = FALSE)
+{
+  pred = rep(NULL, h)
+
+  # The first prediction will be the last row of  the training data set. 
+  newdata = t(tail(train, freq))
+  for (t in 1:(h)){
+    
+    # To deal with the cases where we need to have a matrix for prediction (like in SVM)
+    if(matrix == TRUE)
+    {
+      newdata = matrix(newdata,1,freq)
+    }
+    pred[t] = predict(model, newdata = newdata)
+    
+    # The following element forecast will be from the second element until the previously predicted value (and so on)
+    newdata = c(newdata[-1],pred[t])
+  
+  }
+  
+  # Finally, we transform the predictions into a Time-Series again
+  pred_ts = ts(pred, start = pred_start, freq = freq)
+  
+  return(pred_ts)
+  
+}
+
+
+```
+
+##### Transforming into ML compatible dataset
+
+```{r}
+# We transform everything in vector
+ts_vector = as.vector(ts_train[,"consumption"])
+
+# Get the first row (in vector form) to start the iteration
+ts_ml = ts_vector[1:97]
+
+# For each element of t he vector, generate a new row with a response columns added
+for(i in 1:(length(ts_vector)-97))
+{
+  ts_ml = rbind(ts_ml, as.vector(ts_vector[(i+1):(i+97)]))
+}
+
+```
 
 ##### Random Forest {#rf-without-covariate}
 
+```{r}
+library(randomForest)
+
+# Fit
+rf_fit = randomForest(x = ts_ml[,-97], y=ts_ml[,97])
+
+# Forecast
+pred = predMl(h = test_horizon, freq = 96, pred_start = c(41,1), train = ts_train[,"consumption"], model = rf_fit)
+
+# Calculate and store error
+mse = mse_error(pred, ts_test[,"consumption"])
+cat("Random Forest MSE: ", mse)
+errors_df = rbind(errors_df, data.frame(
+                                        method = "Random Forest",
+                                        covariate = FALSE,
+                                        MSE = mse))
+
+# Plot forecast
+plot_forecast(train = ts_train[,"consumption"], test = ts_test[,"consumption"], pred = pred, title = "Random Forest")
+
+# Check Residuals
+check_residuals(ypred = pred, ytrue = ts_test[,"consumption"], freq = 96)
+```
+
+
 ##### XGBoost {#xgboost-without-covariate}
+
+```{r}
+library(xgboost)
+
+# Fit
+xg_fit = xgboost(data = ts_ml[,-97], label = ts_ml[,97],
+                                        max_depth = 10, 
+                                        eta = .5, 
+                                        nrounds = 50,
+                                        nthread = 2, 
+                                        objective = "reg:squarederror", 
+                                        verbose = FALSE)
+
+# Forecast
+pred = predMl(h = test_horizon, freq = 96, pred_start = c(41,1), train = ts_train[,"consumption"], model = xg_fit, matrix = TRUE)
+
+# Calculate and store error
+mse = mse_error(pred, ts_test[,"consumption"])
+cat("XGBoost MSE: ", mse)
+errors_df = rbind(errors_df, data.frame(
+                                        method = "XGBoost",
+                                        covariate = FALSE,
+                                        MSE = mse))
+
+# Plotting Forecast
+plot_forecast(train = ts_train[,"consumption"], test = ts_test[,"consumption"], pred = pred, title = "XGBoost")
+
+
+# Check residuals
+check_residuals(ypred = pred, ytrue = ts_test[,"consumption"], freq = 96)
+```
 
 ##### SVM {#svm-without-covariate}
 
+```{r}
+library(e1071)
+
+# Fit
+svm_fit = svm(x = ts_ml[,-97], y = ts_ml[,97])
+
+# Forecast
+pred = predMl(h = test_horizon, freq = 96, pred_start = c(41,1), train = ts_train[,"consumption"], model = svm_fit, matrix = TRUE)
+
+# Calculate and store error
+mse = mse_error(pred, ts_test[,"consumption"])
+cat("SVM MSE: ", mse)
+errors_df = rbind(errors_df, data.frame(
+                                        method = "SVM",
+                                        covariate = FALSE,
+                                        MSE = mse))
+
+# Plotting Forecast
+plot_forecast(train = ts_train[,"consumption"], test = ts_test[,"consumption"], pred = pred, title = "SVM")
+
+
+# Check residuals
+check_residuals(ypred = pred, ytrue = ts_test[,"consumption"], freq = 96)
+
+```
+
 ##### Neural Netwrok {#nn-without-covariate}
 
-### With Covariate {#with-covariate}
+```{r}
+
+# Fit
+nn_fit = nnetar(ts_train[,"consumption"], size = 35, p = 10, P = 2)
+
+# Forecast
+pred = forecast(nn_fit, h = test_horizon)$mean
+
+# Calculate and store error
+mse = mse_error(pred, ts_test[,"consumption"])
+cat("MSE Neural Networks: ", mse)
+errors_df = rbind(errors_df, data.frame(
+                                        method = "Neural Networks",
+                                        covariate = FALSE,
+                                        MSE = mse))
+
+# Check residuals
+check_residuals(pred, ts_test[,"consumption"],freq = 96)
+
+# Plot Forecast
+plot_forecast(train = ts_train[,"consumption"], test = ts_test[,"consumption"], pred = pred, xlim = c(40, 55), title = "Neurala Network Forecast")
+
+```
+
+### With Temperature Covariate {#with-covariate}
 
 #### Sarima {#sarima-with-covariate}
 
+```{r}
+
+```
+
+
 #### TSLM {#tslm-with-covariate}
+
+```{r}
+
+```
+
 
 #### Machine Learning Models {#mlmodels-with-covariate}
 
+Support function to predict with covariates
+```{r}
+predMl_xreg = function(h, freq, pred_start,train, xreg_data, model, matrix = FALSE)
+{
+  pred = rep(NULL, h)
+  # The first prediction will be the last row of  the training data set. 
+  newdata = c(tail(train, freq), xreg_data[1])
+  
+  for (t in 1:(h)){
+    
+    # To deal with the cases where we need to have a matrix for prediction (like in SVM)
+    if(matrix == TRUE)
+    {
+      newdata = matrix(newdata,1,freq+1) #+1 to account for the xreg
+    }
+    pred[t] = predict(model, newdata = newdata)
+    
+    # The following element forecast will be from the second element until the previously predicted value (and so on)
+    if(t+1 <= length(xreg_data)){
+      # Remove the first and last (temperature) element
+      newdata = newdata[-c(1, length(newdata))]
+      # Add new prediction and new future temperature value
+      newdata = c(newdata, pred[t], xreg_data[t+1])
+    }
+  }
+  
+  # Finally, we transform the predictions into a Time-Series again
+  pred_ts = ts(pred, start = pred_start, freq = freq)
+  
+  return(pred_ts)
+  
+}
+```
+
+##### Data Transformation into ML data set, including the temperature as the 97th variable. 98th variable is the X_T+1
+
+```{r}
+
+vec_train = as.vector(ts_train[,"consumption"])
+vec_xreg = as.vector(ts_train[,"temperature"])
+
+ts_ml_xreg = c(vec_train[1:97], vec_xreg[96])
+
+# Swapping columns, placing the response variable as the last column]
+swap = vec_xreg[96]
+ts_ml_xreg[98] =  ts_ml_xreg[97]
+ts_ml_xreg[97] = swap
+
+for(i in 1:(length(vec_train)-97))
+{
+    newdata = c(vec_train[(i+1):(i+97)],vec_xreg[i+96])
+    swap = vec_xreg[i+96]
+    newdata[98] = newdata[97]
+    newdata[97] = swap
+    
+    ts_ml_xreg = rbind(ts_ml_xreg, newdata)
+}
+
+```
+
 ##### Random Forest {#rf-with-covariate}
+
+```{r}
+
+# Fit
+rf_fit_xreg = randomForest(x = ts_ml_xreg[,-98], y=ts_ml_xreg[,98], ntree = 1000)
+
+# Forecast
+pred = predMl_xreg(h = test_horizon, freq = 96, pred_start = c(41,1), train = ts_train[,"consumption"], xreg_data = ts_test[,"temperature"], model = rf_fit_xreg)
+
+# Calculate and store error
+mse = mse_error(pred, ts_test[,"consumption"])
+cat("Random Forest with XREG MSE: ", mse)
+errors_df = rbind(errors_df, data.frame(
+                                        method = "Random Forest XREG",
+                                        covariate = TRUE,
+                                        MSE = mse))
+# Check residuals
+check_residuals(pred, ts_test[,"consumption"],freq = 96)
+
+# Plot Forecast
+plot_forecast(train = ts_train[,"consumption"], test = ts_test[,"consumption"], pred = pred, title = "Random Forest [TEMP]")
+
+```
+
 
 ##### XGBoost {#xgboost-with-covariate}
 
+```{r}
+
+# Fit
+xg_fit_xreg = xgboost(data = ts_ml_xreg[,-98], label = ts_ml_xreg[,98],
+                                            max_depth = 10, 
+                                            eta = .5, nrounds = 50,
+                                            nthread = 2, 
+                                            objective = "reg:squarederror", 
+                                            verbose = FALSE)
+# Forecast
+pred = predMl_xreg(h = test_horizon, freq = 96, pred_start = c(41,1), train = ts_train[,"consumption"], xreg_data = ts_test[,"temperature"], model = xg_fit_xreg, matrix = TRUE)
+
+# Error
+mse = mse_error(pred, ts_test[,"consumption"])
+cat("XGBoost XREG MSE: ", mse)
+errors_df = rbind(errors_df, data.frame(
+                                        method = "XGBoost XREG",
+                                        covariate = TRUE,
+                                        MSE = mse))
+
+# Check Residuals
+check_residuals(ypred = pred, ytrue = ts_test[,"consumption"], freq = 96)
+
+# Plot Forecast
+plot_forecast(train = ts_train[,"consumption"], test = ts_test[,"consumption"], pred = pred, title = "XGBoost [TEMP]")
+```
+
+
 ##### SVM {#svm-with-covariate}
+
+```{r}
+# Fit
+svm_fit_xreg = svm(x = ts_ml_xreg[,-98], y = ts_ml_xreg[,98])
+# Forecast
+pred = predMl_xreg(h = test_horizon, freq = 96, pred_start = c(41,1), train = ts_train[,"consumption"], xreg_data = ts_test[,"temperature"], model = svm_fit_xreg, matrix = TRUE)
+
+# Error
+mse = mse_error(pred, ts_test[,"consumption"])
+cat("SVM XREG MSE: ", mse)
+errors_df = rbind(errors_df, data.frame(
+                                        method = "SVM XREG",
+                                        covariate = TRUE,
+                                        MSE = mse))
+
+# Check Residuals
+check_residuals(ypred = pred, ytrue = ts_test[,"consumption"], freq = 96)
+
+# Plot Forecast
+plot_forecast(train = ts_train[,"consumption"], test = ts_test[,"consumption"], pred = pred, title = "SVM [TEMP]")
+```
 
 ##### Neural Netwrok {#nn-with-covariate}
 
+```{r}
+# Fit
+nn_fit_xreg = nnetar(ts_train[,"consumption"], size = 35, p = 10, P = 2, xreg = ts_train[,"temperature"])
+
+
+# Forecast
+pred = forecast(nn_fit_xreg, h = test_horizon, xreg = ts_test[,"temperature"])$mean
+
+# Calculate and store error
+mse = mse_error(pred, ts_test[,"consumption"])
+cat("MSE Neural Networks: ", mse)
+errors_df = rbind(errors_df, data.frame(
+                                        method = "Neural Networks",
+                                        covariate = TRUE,
+                                        MSE = mse))
+
+# Check residuals
+check_residuals(pred, ts_test[,"consumption"],freq = 96)
+
+# Plot Forecast
+plot_forecast(train = ts_train[,"consumption"], test = ts_test[,"consumption"], pred = pred, xlim = c(40, 55), title = "Neural Network XREG Forecast")
+
+```
+
 ## Model Selection
+
+LITTLE TEXT ABOUT THE BEST MODELA
+
+```{r}
+
+sorted_error = errors_df[order(errors_df$MSE), ]
+sorted_error
+
+```
 
 ## Cross-Validation {#cross-validation}
 
+```{r}
+
+
+train_splits = list(c(35,96),c(37,96),c(39,96),c(42,96),c(45,96),c(47,96))
+test_splits = list(c(36,1),c(38,1),c(40,1),c(43,1),c(46,1),c(48,1))
+splits = 6
+
+error = c()
+
+for (i in (1 : splits)){
+  
+    # New Split
+    ts_cv_train = window(ts, end = train_splits[[i]])
+    ts_cv_test = window(ts, start = test_splits[[i]])
+  
+    # Train
+    fit_cv = Arima(ts_cv_train[,"consumption"], order = c(1,0,2), seasonal = c(0,1,1), xreg = ts_cv_train[,"temperature"])
+    
+    # Forecast
+    pred = forecast(fit_cv, h = length(ts_cv_test[,"consumption"]), xreg = ts_cv_test[,"temperature"])
+   
+    # Calculate error
+    mse = mse_error(pred$mean, ts_cv_test[,"consumption"])  
+    error = rbind(error, mse)
+    
+    cat(mse, "\n")
+}
+
+cat("CV Average:", mean(error))
+```
+
+
 ## Best Model Training {#best-model-training}
+
+Training the best model in the whole dataset
+
+```{r}
+# Avoid warning for different column names
+xreg = as.matrix(ts[,"temperature"])
+colnames(xreg) = c("temperature")
+
+best_model_xreg = Arima(ts[,"consumption"], order = c(1,0,2), seasonal = c(0,1,1), xreg = xreg)
+best_model = Arima(ts[,"consumption"], order = c(1,0,2), seasonal = c(0,1,1))
+```
+
 
 ## Forecasting {#forecasting}
 
+```{r}
+xreg = future_temperature_ts
+colnames(xreg) = c("temperature")
+
+final_pred = forecast(best_model, h = 96)$mean
+final_pred_xreg = forecast(best_model_xreg, xreg = future_temperature_ts)$mean
+
+forescasts = data.frame(
+    withoutTemp = final_pred,
+    withTemp = final_pred_xreg
+  )
+
+```
+
 ## Exporting Results {#exporting-results}
+
+Saving Excell File
+```{r}
+library(openxlsx)
+
+write.xlsx(forescasts, "CarlosTussiLeite.xlsx", colNames = FALSE)
+```
