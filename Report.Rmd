@@ -1,0 +1,117 @@
+---
+title: "Time-Series Analysis Exam - Report"
+author: "Carlos Eduardo Tussi Leite"
+output: pdf_document
+date: "2025-07-15"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Electricity Consumption Time-Series Analysis and Forecast
+
+## Table of Contents
+
+-   [Introduction](#about)
+-   [Data](#data)
+    -   [Overview](#overview)
+    -   [Missing Values](#missing-values)
+    -   [Time Series Data](#time-series-data)
+        -   [EDA](#eda)
+        -   [Feature Engineering](#feature-engineering)
+        -   [Outliers](#outliers)
+        -   [Pre-Processed Time Series Data](#pre-processed-data)
+        -   [Data Split](#data-split)
+-   [Modeling](#modeling)
+    -   [Without Covariate](#without-covariate)
+        -   [ExponentialSmoothin](#exponential-smoothing)
+        -   [SARIMA](#sarima-without-covariate)
+        -   [TSLM](#tslm-without-covariate)
+        -   [Machine Learning Models](#mlmodels-without-covariate)
+            -   [Random Forest](#rf-without-covariate)
+            -   [XGBoost](#xgboost-without-covariate)
+            -   [SVM](#svm-without-covariate)
+            -   [Neural Networks](#nn-without-covariate)
+    -   [With Covariate](#with-covariate)
+        -   [SARIMA](#sarima-with-covariate)
+        -   [TSLM](#tslm-with-covariate)
+        -   [Machine Learning Models](#mlmodels-with-covariate)
+            -   [Random Forest](#rf-with-covariate)
+            -   [XGBoost](#xgboost-with-covariate)
+            -   [SVM](#svm-with-covariate)
+            -   [Neural Networks](#nn-with-covariate)
+    -   [Model Selection](#modelselection)
+    -   [Cross-Validation](#cross-validation)
+    -   [Best Model Trainig](#best-model-training)
+-   [Forecasting](#forecasting)
+-   [Exporting Results](#exporting-results)
+
+## Introduction
+
+## Data {#data}
+
+### Overview {#overview}
+
+### Missing Values {#missing-values}
+
+### Time-Series Data {#time-series-data}
+
+### EDA {#eda}
+
+### Features Engineering
+
+### Outliers {#outliers}
+
+### Pre-processed data {#pre-processed-data}
+
+### Data Split {#data-split}
+
+## Modeling {#modeling}
+
+### Without Covariate {#without-covariate}
+
+#### Exponential Smoothing {#ses-without-covariate}
+
+#### Sarima {#sarima-without-covariate}
+
+#### TSLM {#tslm-without-covariate}
+
+#### Machine Learning Models {#mlmodels-without-covariate}
+
+##### Random Forest {#rf-without-covariate}
+
+##### XGBoost {#xgboost-without-covariate}
+
+##### SVM {#svm-without-covariate}
+
+##### Neural Netwrok {#nn-without-covariate}
+
+### With Covariate {#with-covariate}
+
+#### Sarima {#sarima-with-covariate}
+
+#### TSLM {#tslm-with-covariate}
+
+#### Machine Learning Models {#mlmodels-with-covariate}
+
+##### Random Forest {#rf-with-covariate}
+
+##### XGBoost {#xgboost-with-covariate}
+
+##### SVM {#svm-with-covariate}
+
+##### Neural Netwrok {#nn-with-covariate}
+
+## Model Selection
+
+## Cross-Validation {#cross-validation}
+
+## Best Model Training {#best-model-training}
+
+## Forecasting {#forecasting}
+
+## Exporting Results {#exporting-results}
